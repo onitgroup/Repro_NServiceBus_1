@@ -105,7 +105,7 @@ namespace NServiceBus7TransactionTest.Tests
             var queue = MessageQueueUtils.GetPrivateQueueByName(_endpointName);
             queue.Purge();
 
-            using (var scope = new TransactionScope(TransactionScopeOption.RequiresNew, TimeSpan.MaxValue))
+            using (var scope = new TransactionScope(TransactionScopeOption.RequiresNew, TimeSpan.MaxValue, TransactionScopeAsyncFlowOption.Enabled))
             {
                 endpointInstance.Send(new Command1()).GetAwaiter().GetResult();
                 Assert.AreEqual(0, queue.GetAllMessages().Count());
