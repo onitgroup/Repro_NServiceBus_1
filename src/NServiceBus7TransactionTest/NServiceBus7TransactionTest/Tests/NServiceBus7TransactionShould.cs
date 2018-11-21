@@ -6,6 +6,7 @@ using NServiceBus7TransactionTest.Data;
 using NServiceBus7TransactionTest.Data.Messages;
 using System;
 using System.Linq;
+using System.Threading;
 using System.Transactions;
 
 namespace NServiceBus7TransactionTest.Tests
@@ -15,76 +16,113 @@ namespace NServiceBus7TransactionTest.Tests
     {
         string _ravenDbUrl;
         string _endpointName;
-        EndpointConfiguration _endpointConfiguration;
+
 
         [TestInitialize]
         public void TestInitialize()
         {
-            _ravenDbUrl = "http://localhost:8083";
-
+            _ravenDbUrl = "http://localhost:8090";
             _endpointName = "NServiceBus7TransactionTest";
-            _endpointConfiguration = new EndpointConfiguration(_endpointName);
-            _endpointConfiguration.SendOnly();
-            //_endpointConfiguration.EnableInstallers();
-            _endpointConfiguration.SendFailedMessagesTo(_endpointName + ".error");
+        }
 
-            var transport = _endpointConfiguration.UseTransport<MsmqTransport>();
+        EndpointConfiguration BuildConfiguration()
+        {
+            var cfg = new EndpointConfiguration(_endpointName);
+            cfg.SendFailedMessagesTo(_endpointName + ".error");
+
+            var transport = cfg.UseTransport<MsmqTransport>();
             transport.Transactions(TransportTransactionMode.SendsAtomicWithReceive);
 
             var asm = typeof(Event1).Assembly;
             var routingMsmq = transport.Routing();
             routingMsmq.RegisterPublisher(asm, _endpointName);
             routingMsmq.RouteToEndpoint(asm, _endpointName);
+
+            cfg.DisableFeature<TimeoutManager>();
+
+            return cfg;
         }
+
+        EndpointConfiguration BuildConfigurationMSMQ()
+        {
+            var cfg = BuildConfiguration();
+            cfg.UsePersistence<MsmqPersistence>();
+            return cfg;
+        }
+
+        EndpointConfiguration BuildConfigurationRavenDb()
+        {
+            var cfg = BuildConfiguration();
+            var connectionParams = new ConnectionParameters();
+            connectionParams.DatabaseName = _endpointName;
+            connectionParams.Url = _ravenDbUrl;
+
+            var persistence = cfg.UsePersistence<RavenDBPersistence, StorageType.Subscriptions>();
+            persistence.DisableSubscriptionVersioning();
+            persistence.SetDefaultDocumentStore(connectionParams);
+            return cfg;
+        }
+
 
         [TestMethod]
         public void MsmqPersistenceTest()
         {
-            _endpointConfiguration.DisableFeature<TimeoutManager>();
-            _endpointConfiguration.UsePersistence<MsmqPersistence>();
+            var cfg = BuildConfigurationMSMQ();
 
-            RunTransactionTest();
+            cfg.EnableInstallers();
+            var instance = Endpoint.Start(cfg).ConfigureAwait(false).GetAwaiter().GetResult();
+            instance.Stop().GetAwaiter().GetResult();
+
+
+            cfg = BuildConfigurationMSMQ();
+            cfg.SendOnly();
+            instance = Endpoint.Start(cfg).ConfigureAwait(false).GetAwaiter().GetResult();
+
+            RunTransactionTest(instance);
         }
 
         [TestMethod]
         public void RavenDbPersistenceTest()
         {
-            var connectionParams = new ConnectionParameters();
-            connectionParams.DatabaseName = _endpointName;
-            connectionParams.Url = _ravenDbUrl;
+            var cfg = BuildConfigurationRavenDb();
 
-            var persistence = _endpointConfiguration.UsePersistence<RavenDBPersistence>();
-            persistence.DisableSubscriptionVersioning();
-            persistence.SetDefaultDocumentStore(connectionParams);
+            cfg.EnableInstallers();
+            var instance = Endpoint.Start(cfg).ConfigureAwait(false).GetAwaiter().GetResult();
+            instance.Subscribe<Event1>().GetAwaiter().GetResult();
+            instance.Subscribe<Event2>().GetAwaiter().GetResult();
+            instance.Stop().GetAwaiter().GetResult();
 
-            RunTransactionTest();
+
+            cfg = BuildConfigurationRavenDb();
+            cfg.SendOnly();
+            instance = Endpoint.Start(cfg).ConfigureAwait(false).GetAwaiter().GetResult();
+
+            RunTransactionTest(instance);
         }
 
-        private void RunTransactionTest()
+        void RunTransactionTest(IEndpointInstance endpointInstance)
         {
-            var endpointInstance = Endpoint.Start(_endpointConfiguration).ConfigureAwait(false).GetAwaiter().GetResult();
-
             var queue = MessageQueueUtils.GetPrivateQueueByName(_endpointName);
             queue.Purge();
 
             using (var scope = new TransactionScope(TransactionScopeOption.RequiresNew, TimeSpan.MaxValue))
             {
                 endpointInstance.Send(new Command1()).GetAwaiter().GetResult();
-                Assert.AreEqual(queue.GetAllMessages().Count(), 0);
+                Assert.AreEqual(0, queue.GetAllMessages().Count());
 
                 endpointInstance.Send(new Command2()).GetAwaiter().GetResult();
-                Assert.AreEqual(queue.GetAllMessages().Count(), 0);
+                Assert.AreEqual(0, queue.GetAllMessages().Count());
 
                 endpointInstance.Publish(new Event1()).GetAwaiter().GetResult();
-                Assert.AreEqual(queue.GetAllMessages().Count(), 0);
+                Assert.AreEqual(0, queue.GetAllMessages().Count());
 
                 endpointInstance.Publish(new Event2()).GetAwaiter().GetResult();
-                Assert.AreEqual(queue.GetAllMessages().Count(), 0);
+                Assert.AreEqual(0, queue.GetAllMessages().Count());
 
                 scope.Complete();
             }
 
-            Assert.AreEqual(queue.GetAllMessages().Count(), 4);
+            Assert.AreEqual( 4, queue.GetAllMessages().Count());
         }
     }
 }
